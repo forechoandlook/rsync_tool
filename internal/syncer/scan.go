@@ -29,6 +29,8 @@ type watchState struct {
 	full    bool
 	watched map[string]bool
 	failure string
+	rebuild bool
+	done    chan struct{}
 }
 
 func (s *Scanner) EnableWatch() {
@@ -36,12 +38,14 @@ func (s *Scanner) EnableWatch() {
 		return
 	}
 	w, err := fsnotify.NewWatcher()
-	s.watch = &watchState{watcher: w, dirty: map[string]bool{}, watched: map[string]bool{}}
+	s.watch = &watchState{watcher: w, dirty: map[string]bool{}, watched: map[string]bool{}, done: make(chan struct{})}
 	if err != nil {
 		s.watch.failure = err.Error()
 		return
 	}
+	state := s.watch
 	go func() {
+		defer close(state.done)
 		for {
 			select {
 			case ev, ok := <-w.Events:
@@ -56,31 +60,41 @@ func (s *Scanner) EnableWatch() {
 				if builtin(p) || p == ".." || strings.HasPrefix(p, "../") {
 					continue
 				}
-				s.watch.mu.Lock()
-				s.watch.dirty[p] = true
-				if len(s.watch.dirty) > 65536 {
-					s.watch.full = true
-					clear(s.watch.dirty)
+				state.mu.Lock()
+				state.dirty[p] = true
+				if len(state.dirty) > 65536 {
+					state.full = true
+					clear(state.dirty)
+				}
+				if ev.Op&fsnotify.Rename != 0 {
+					for watched := range state.watched {
+						if watched == ev.Name || strings.HasPrefix(watched, ev.Name+string(os.PathSeparator)) {
+							state.rebuild = true
+							break
+						}
+					}
 				}
 				if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-					delete(s.watch.watched, ev.Name)
+					delete(state.watched, ev.Name)
 				}
-				s.watch.mu.Unlock()
+				state.mu.Unlock()
 			case err, ok := <-w.Errors:
 				if !ok {
 					return
 				}
-				s.watch.mu.Lock()
-				s.watch.full = true
-				s.watch.failure = err.Error()
-				s.watch.mu.Unlock()
+				state.mu.Lock()
+				state.full = true
+				state.failure = err.Error()
+				state.mu.Unlock()
 			}
 		}
 	}()
 }
 func (s *Scanner) Close() error {
 	if s.watch != nil && s.watch.watcher != nil {
-		return s.watch.watcher.Close()
+		err := s.watch.watcher.Close()
+		<-s.watch.done
+		return err
 	}
 	return nil
 }
@@ -106,6 +120,20 @@ func (s *Scanner) addWatch(full string) {
 func (s *Scanner) Scan() (result Snapshot, scanErr error) {
 	start := time.Now()
 	defer func() { result.Stats.ElapsedUS = time.Since(start).Microseconds() }()
+	// inotify retains child watches under old paths after a parent rename.
+	// Recreate the watcher before registering the renamed subtree so old and new
+	// path aliases cannot share descriptors and invalidate each other.
+	if s.watch != nil {
+		s.watch.mu.Lock()
+		rebuild := s.watch.rebuild
+		s.watch.mu.Unlock()
+		if rebuild {
+			s.Close()
+			s.watch = nil
+			s.EnableWatch()
+			s.lastFull = time.Time{}
+		}
+	}
 	s.Stats = ScanStats{}
 	full := s.snapshot.Files == nil || s.watch == nil || time.Since(s.lastFull) >= 30*time.Second
 	dirty := map[string]bool{}

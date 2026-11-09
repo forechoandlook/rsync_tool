@@ -1,0 +1,9 @@
+/bin/
+/assets/payload/*.gz
+
+# Local synchronization state, generated artifacts, and private benchmark captures.
+.rsync_tool/
+/benchmarks/
+*.log
+.DS_Store
+__pycache__/

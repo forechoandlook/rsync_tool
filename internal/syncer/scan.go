@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -199,6 +200,9 @@ func (s *Scanner) Scan() (result Snapshot, scanErr error) {
 			}
 			p := filepath.ToSlash(rel)
 			if os.IsNotExist(err) {
+				if p == "." {
+					return fmt.Errorf("sync root missing: %w", err)
+				}
 				return nil
 			}
 			if err != nil {

@@ -249,6 +249,21 @@ func TestNewBusyFilePreventsFalseFlushSuccess(t *testing.T) {
 		t.Fatalf("expected pending new file, got %v", err)
 	}
 }
+
+func TestMissingRootDoesNotPropagateDeletion(t *testing.T) {
+	e, local, remote := setup(t)
+	put(t, remote, "keep.txt", "keep")
+	cycle(t, e)
+	if err := os.RemoveAll(local); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Cycle(); err == nil {
+		t.Fatal("missing root must fail synchronization")
+	}
+	if get(t, remote, "keep.txt") != "keep" {
+		t.Fatal("missing local root deleted remote content")
+	}
+}
 func TestWatchMetadataPreservingRewrite(t *testing.T) {
 	root := t.TempDir()
 	put(t, root, "a", "before")
